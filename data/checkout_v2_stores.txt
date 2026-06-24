@@ -1,0 +1,24 @@
+# Stores that should be routed to the V2 checkout (templates/checkout-v2.html)
+# AND get the "NEW" pill in the admin dashboard.
+#
+# Format:
+#   domain                  ← v2 store, currency falls back to ?country= URL param (default CAD)
+#   domain:US               ← v2 store, ALWAYS use USD (theme-bridge currency is overridden)
+#   domain:CA               ← v2 store, ALWAYS use CAD
+#
+# Rules:
+#   - One source domain per line
+#   - Match is case-insensitive
+#   - http(s):// and www. prefixes are stripped on both sides of the match
+#   - Trailing slashes are stripped
+#   - Lines starting with # are comments
+#   - Blank lines are ignored
+#
+# Example:
+#   kenmount-terrace-peptides.myshopify.com:CA
+#   peptidelab-usa.myshopify.com:US
+#   victoriapeps.ca:CA
+#
+# Add your 200 US + 200 CA stores below:
+
+https://kenmountterracepeptides.ca/:CA

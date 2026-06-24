@@ -1,0 +1,34 @@
+# Environment / secrets
+.env
+.env.*
+.env2
+*.env
+.env.local
+.env.*.local
+
+# Python
+*.pyc
+__pycache__/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Tooling
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+
+# Logs / OS
+*.log
+logs/
+.DS_Store
+Thumbs.db
+
+# Local DB dumps / backups
+*.sqlite
+*.sqlite3
+*.bak

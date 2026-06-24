@@ -1,0 +1,27 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: push this repo to GitHub, then in Render → New → Blueprint, pick the repo.
+#
+# Secrets (DATABASE_URL + all API keys/webhook secrets/admin creds) are NOT in
+# this file. Set them in the Render dashboard → your service → Environment.
+# Tip: Render lets you bulk-paste a .env there ("Add from .env").
+services:
+  - type: web
+    name: checkout-server
+    runtime: python
+    plan: starter            # 'free' works but sleeps on inactivity — bad for a
+                             # webhook receiver. 'starter' stays always-on.
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      - key: ENVIRONMENT
+        value: production
+      # Neon connection string — set in dashboard (kept out of git).
+      # Use the connection string Neon shows; the app normalizes it for asyncpg.
+      - key: DATABASE_URL
+        sync: false
+      # Everything else (WHOP_*, PYMTZ_*, STRIPE_*, BTCPAY_*, ADMIN_*, SHOPIFY_*,
+      # NOWPAYMENTS_*, BRIDGE_*, RESEND_API_KEY, etc.) → add in the dashboard.
