@@ -6,7 +6,7 @@
 # Tip: Render lets you bulk-paste a .env there ("Add from .env").
 services:
   - type: web
-    name: checkout-server
+    name: checkout-portal-neon
     runtime: python
     plan: starter            # 'free' works but sleeps on inactivity — bad for a
                              # webhook receiver. 'starter' stays always-on.
