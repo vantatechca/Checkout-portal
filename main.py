@@ -429,9 +429,17 @@ async def brand_middleware(request: Request, call_next):
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Brand).where(Brand.domain == host, Brand.active == True)
+            select(Brand).where(Brand.domain == host)
         )
         brand = result.scalar_one_or_none()
+
+    # Treat an inactive brand as "no brand". We filter in Python rather than in
+    # SQL (`Brand.active == True`) because Neon DBs imported from MySQL store
+    # `brands.active` as smallint, not boolean — and Postgres rejects the
+    # `smallint = boolean` comparison. Reading the value works regardless of
+    # the underlying column type (1/True are both truthy).
+    if brand is not None and not brand.active:
+        brand = None
 
     request.state.brand = brand
 
