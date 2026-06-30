@@ -96,7 +96,7 @@ router = APIRouter(
 logger = logging.getLogger(__name__)
 
 
-# ─── Orders ──────────────────────────────────────────────────────────────────
+# ─── Orders ───────────────────────────────────────────────────────────────────
 
 @router.get("/orders")
 async def list_orders(
@@ -212,15 +212,15 @@ async def list_orders(
         elif o.zelle_payment and o.zelle_payment.status == "underpaid":
             d["receivedAmount"]  = float(o.zelle_payment.received_amount or 0)
             d["underpaidMethod"] = "zelle"
-            
+
         elif o.crypto_invoice and o.crypto_invoice.status == "Underpaid":
             d["receivedAmount"]  = float(o.crypto_invoice.received_fiat or 0)
             d["underpaidMethod"] = "crypto"
-            
+
         elif o.nowpayments_invoice and o.nowpayments_invoice.status == "underpaid":   # ← add
             d["receivedAmount"]  = float(o.nowpayments_invoice.received_fiat or 0)    # ← add
-            d["underpaidMethod"] = "altcoin"   
-            
+            d["underpaidMethod"] = "altcoin"
+
         # Flag abandoned orders (customer info saved, never clicked Place Order)
         if (
             o.payment_status == PaymentStatus.pending
@@ -526,7 +526,7 @@ async def mark_order_paid(
             logger.error(f"Confirmation email failed for {order.id}: {e}")
     return {"success": True, "orderId": order_id}
 
-# ─── Email preview ────────────────────────────────────────────────────────────
+# ─── Email preview ──────────────────────────────────────────────────────────
 
 @router.get("/orders/{order_id}/email-preview")
 async def email_preview(
@@ -551,7 +551,7 @@ async def email_preview(
     return tpl
 
 
-# ─── List emails sent for an order ────────────────────────────────────────────
+# ─── List emails sent for an order ──────────────────────────────────────────
 
 @router.get("/orders/{order_id}/emails")
 async def list_order_emails(order_id: str, db: AsyncSession = Depends(get_db)):
@@ -1078,7 +1078,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
     from sqlalchemy import func
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # ── server ────────────────────────────────────────────────────────────────
+    # ── server ──────────────────────────────────────────────────────────────
     db_ok = True
     try:
         from sqlalchemy import text as _sqltext
@@ -1222,7 +1222,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
     # today should show up in paid_count/revenue even though it wasn't
     # created today.
 
-    # 1. Orders created today, grouped by status — for orders_total + status breakdown
+    # 1. Orders created today, grouped by status → for orders_total + status breakdown
     created_today_q = (
         select(Order.payment_status, func.count(Order.id))
         .where(Order.created_at >= today_start)
@@ -1232,7 +1232,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
     created_by_status = {r[0].value: int(r[1]) for r in created_rows}
     total_today = sum(created_by_status.values())
 
-    # 2. Orders PAID today (regardless of when created) — true revenue today
+    # 2. Orders PAID today (regardless of when created) → true revenue today
     paid_today_q = (
         select(func.count(Order.id), func.coalesce(func.sum(Order.total), 0))
         .where(Order.paid_at >= today_start)
@@ -1253,7 +1253,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
         .where(Order.payment_status == PaymentStatus.pending)
         .where(or_(
             Order.payment_method != PaymentMethod.card,
-            _is_delayed_card(),    # pymtz / Highriskify / WP onramp pending cards count
+            _is_delayed_card(),    # pymtz / Highriskify / WP onramp
         ))
         .where(or_(
             Order.customer_emails_sent == 0,
@@ -1295,7 +1295,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
         for r in src_rows
     ]
 
-    # ── recent events (last 50) ───────────────────────────────────────────────
+    # ── recent events (last 50) ──────────────────────────────────────────────
     recent_q = (
         select(
             Order.id, Order.payment_status, Order.payment_method,

@@ -1,6 +1,6 @@
 """
-POST /webhooks/btcpay         → BTCPay Server payment notifications
-POST /webhooks/shopify-paid   → Shopify order paid (from bridge stores)
+POST /webhooks/btcpay         — BTCPay Server payment notifications
+POST /webhooks/shopify-paid   — Shopify order paid (from bridge stores)
 """
 import base64
 import hashlib
@@ -19,7 +19,7 @@ from database import AsyncSessionLocal
 from models.order import Order, CryptoInvoice, NowPaymentsInvoice, PaymentMethod, PaymentStatus
 from services.btcpay import verify_btcpay_webhook, BTCPAY_STATUS_MAP, BTCPayClient
 from services.nowpayments import verify_nowpayments_ipn, NOWPAYMENTS_STATUS_MAP
-from services.pymtz import verify_pymtz_webhook, PYMTZ_STATUS_MAP
+from services.pymtz import PYMTZ_STATUS_MAP
 import httpx
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -417,163 +417,151 @@ async def nowpayments_ipn(
     return {"received": True, "action": our_status}
 
 # ─── POST /webhooks/pymtz ─────────────────────────────────────────────────────
-# pymtz fires this on payment.completed / payment.failed. On completion we mark
-# the order paid, auto-create the Shopify order, and send the affiliate webhook
-# — mirroring the NowPayments handler above.
+# Based on https://pymtz.co/api-guide.html (the simpler page). pymtz's two doc
+# pages disagree on the event name — api-guide.html shows "payment.succeeded",
+# api-docs.html shows "payment.completed". We accept BOTH so we're not at the
+# mercy of which one pymtz's production actually fires.
+#
+# FORGERY PROTECTION
+# pymtz documents webhook signing but never tells us how to get the signing
+# secret, so we can't verify HMAC signatures. Instead, before marking ANY
+# order paid based on a webhook, we call pymtz's authenticated GET
+# /payments/{payment_id} endpoint using our API key. The forger doesn't have
+# our API key, so they can't fake pymtz's response — and pymtz will only
+# report status="completed" for payments that were actually paid. A forged
+# webhook gets rejected because pymtz itself says the payment isn't complete.
+#
+# What this still gives up vs api-docs.html coverage:
+#   • No failure/refund handler — declines stay `pending` until expiry;
+#     refunds get flipped manually in /peps-admin-2026.
 
 @router.post("/pymtz")
-async def pymtz_webhook(
-    request: Request,
-    x_pymtz_signature: str = Header(None, alias="x-pymtz-signature"),
-    pymtz_signature:   str = Header(None, alias="pymtz-signature"),
-    x_signature:       str = Header(None, alias="x-signature"),
-):
+async def pymtz_webhook(request: Request):
     """
-    pymtz webhook handler — per https://pymtz.co/api-docs.html#webhooks
+    pymtz webhook handler — docs-literal per api-guide.html, plus an
+    authenticated cross-verify against pymtz to defeat webhook forgery.
 
-    Documented event types:
-      - payment.completed   → mark order paid + downstream Shopify/affiliate
-      - payment.failed      → mark order failed
-      - refund.created      → mark a previously-paid order refunded
-    Also accepts payment.expired (referenced in payment status list but not
-    documented as a webhook event — handled defensively).
-
-    Documented payload shape:
-      { "id": "evt_xyz789",
-        "type": "payment.completed",
-        "data": { "payment_id": "pay_...", "amount": 100, "currency": "USD" },
-        "created_at": "2024-03-01T10:05:00Z" }
-
-    Signature: `sha256=<hex>` of raw body, HMAC-SHA256 with the webhook secret.
-    Header name not specified in docs — we accept x-pymtz-signature,
-    pymtz-signature, or x-signature.
+    Documented payload (their Node example):
+        { "event": "payment.succeeded", "data": { ... } }
     """
-    raw_body = await request.body()
-    signature = x_pymtz_signature or pymtz_signature or x_signature or ""
-
-    if not verify_pymtz_webhook(raw_body, signature):
-        logger.warning("pymtz webhook: invalid signature")
-        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
-
     try:
-        data = await request.json()
+        body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
-    event_id   = data.get("id", "")          # evt_xxx — used for logging / idempotency
-    event_type = data.get("type", data.get("event", ""))
-    payment    = data.get("data", data) or {}
+    # Webhook events may use the "event" key (api-guide.html style) or the
+    # "type" key (api-docs.html style). Read both.
+    event = body.get("event") or body.get("type") or ""
+    data  = body.get("data", {}) or {}
 
-    # `payment_id` is the documented key; fall back to `id` in case of variants.
-    # For refund events, also accept `refund_id` if the payment_id isn't there.
-    payment_id = str(
-        payment.get("payment_id")
-        or payment.get("id")
-        or payment.get("refund_id")
-        or ""
-    )
+    # Accept both event-name styles. Anything else → log + ack.
+    if event not in ("payment.succeeded", "payment.completed"):
+        logger.info(f"pymtz webhook: ignoring event {event!r}")
+        return {"received": True}
 
-    # Derive our internal status from event type.
-    # pymtz's docs use TWO different event-name styles across pages:
-    #   API reference   → "payment.completed", "refund.created"
-    #   Integration guide → "payment.succeeded"
-    # We accept both styles defensively so it doesn't matter which one pymtz
-    # actually sends from production.
-    et = (event_type or "").lower()
-    if et in ("payment.completed", "payment.succeeded", "payment.success"):
-        pm_status = "completed"
-    elif et in ("payment.failed", "payment.declined"):
-        pm_status = "failed"
-    elif et in ("payment.expired", "payment.timeout"):
-        pm_status = "expired"
-    elif et in ("refund.created", "refund.succeeded", "refund.completed"):
-        pm_status = "refunded"
-    else:
-        pm_status = payment.get("status", "")
+    payment_id = str(data.get("payment_id") or data.get("id") or "")
+    metadata   = data.get("metadata", {}) or {}
+    order_id   = metadata.get("order_id", "")
 
-    metadata = payment.get("metadata", {}) or {}
-    order_id = metadata.get("order_id", "")
-
-    # Fallback: recover order_id by matching the stored payment_ref.
-    # For refunds, pymtz sends the original payment_id (or links via metadata),
-    # so the same lookup works for both.
+    # Recover order via payment_ref if metadata didn't carry order_id.
     if not order_id and payment_id:
         async with AsyncSessionLocal() as db:
             res = await db.execute(select(Order).where(Order.payment_ref == payment_id))
-            ord_match = res.scalar_one_or_none()
-            if ord_match:
-                order_id = ord_match.id
+            match = res.scalar_one_or_none()
+            if match:
+                order_id = match.id
 
     logger.info(
-        f"pymtz webhook: event_id={event_id} type={event_type} payment={payment_id} "
-        f"status={pm_status} order={order_id}"
+        f"pymtz webhook: event={event} payment={payment_id} order={order_id}"
     )
 
     if not order_id:
         logger.warning(f"pymtz webhook: could not resolve order for payment {payment_id}")
-        return {"received": True, "action": "no_order"}
+        return {"received": True}
 
-    our_status = PYMTZ_STATUS_MAP.get(pm_status)
-    if not our_status or our_status == "pending":
-        return {"received": True, "action": "none"}
+    # ── Pre-read order for currency + idempotency ────────────────────────────
+    # We do this BEFORE the cross-verify HTTP call so we (a) can skip pymtz
+    # entirely if the order is already paid, and (b) know which pymtz account
+    # (CA vs US) to authenticate against.
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Order).where(Order.id == order_id))
+        order_pre = result.scalar_one_or_none()
+    if not order_pre:
+        logger.warning(f"pymtz webhook: no order found for {order_id}")
+        return {"received": True}
+    if order_pre.payment_status == PaymentStatus.paid:
+        return {"received": True}   # already paid — skip
 
-    # ── REFUND PATH ───────────────────────────────────────────────────────────
-    # Refunds transition paid → refunded. Different from the pending → terminal
-    # path because the order has already been fulfilled downstream. We mark the
-    # order refunded and add a note but DO NOT undo Shopify / affiliate (admin's
-    # call — refund accounting is downstream of the processor).
-    if our_status == "refunded":
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(Order).where(Order.id == order_id))
-            order  = result.scalar_one_or_none()
-            if not order:
-                logger.warning(f"pymtz webhook: no order found for {order_id}")
-                return {"received": True, "action": "not_found"}
+    # ── Forgery protection #1: payment_id must belong to THIS order ───────────
+    # When /api/checkout/card creates a pymtz payment, we stash the returned
+    # pymtz payment ID on order.payment_ref. A legitimate webhook for this
+    # order must therefore have payment_id == order.payment_ref. This blocks
+    # the "use someone else's paid payment_id to mark other orders paid"
+    # attack — the forger would need the exact pymtz payment ID that pymtz
+    # created for THIS order, which they could only know if they were the
+    # one who initiated checkout for it.
+    if not payment_id:
+        logger.warning(f"pymtz webhook: REJECTED — no payment_id for order {order_id}")
+        return {"received": True}
+    if not order_pre.payment_ref:
+        logger.warning(
+            f"pymtz webhook: REJECTED — order {order_id} has no payment_ref "
+            f"(no pymtz payment ever created for it?)"
+        )
+        return {"received": True}
+    if order_pre.payment_ref != payment_id:
+        logger.warning(
+            f"pymtz webhook: REJECTED — payment_id mismatch (webhook payment_id="
+            f"{payment_id}, order.payment_ref={order_pre.payment_ref!r}). Order "
+            f"{order_id} likely targeted by forgery using another order's payment ID."
+        )
+        return {"received": True}
 
-            # Idempotency: don't re-write if already refunded
-            if order.payment_status == PaymentStatus.refunded:
-                return {"received": True, "action": "already_refunded"}
+    # ── Forgery protection #2: cross-verify with pymtz API ────────────────────
+    # Confirms the payment actually completed by asking pymtz directly using
+    # our authenticated API key. Catches the (now narrow) cases where the
+    # webhook is forged for a payment_id that genuinely belongs to this order
+    # but hasn't actually completed yet.
+    try:
+        pymtz_country = "US" if (order_pre.currency or "").upper() == "USD" else "CA"
+        from services.pymtz import PymtzClient
+        pymtz_payment = await PymtzClient(country=pymtz_country).get_payment(payment_id)
+    except Exception as e:
+        logger.warning(
+            f"pymtz webhook: cross-verify call failed for payment={payment_id} "
+            f"order={order_id}: {e}"
+        )
+        return {"received": True}
 
-            if order.payment_status != PaymentStatus.paid:
-                logger.warning(
-                    f"pymtz refund webhook for order {order_id} that wasn't paid "
-                    f"(current: {order.payment_status.value}) — accepting anyway"
-                )
+    pymtz_status = str(pymtz_payment.get("status") or "").lower()
+    if pymtz_status not in ("completed", "succeeded", "paid"):
+        logger.warning(
+            f"pymtz webhook: REJECTED — pymtz reports status={pymtz_status!r} for "
+            f"payment={payment_id} order={order_id}. Likely forged or stale."
+        )
+        return {"received": True}
 
-            order.payment_status = PaymentStatus.refunded
-            order.payment_notes  = f"pymtz refund {payment_id} (event {event_id})."
-            await db.commit()
-            logger.info(f"💸 Refund recorded (pymtz): order {order.id}")
-        return {"received": True, "action": "refunded"}
-
-    # ── PAYMENT TERMINAL PATH (completed / failed / expired) ──────────────────
+    # ── Mark paid (idempotent — second guard in case of race) ────────────────
     should_create_shopify = False
     async with AsyncSessionLocal() as db:
         result = await db.execute(select(Order).where(Order.id == order_id))
         order  = result.scalar_one_or_none()
         if not order:
-            logger.warning(f"pymtz webhook: no order found for {order_id}")
-            return {"received": True, "action": "not_found"}
+            return {"received": True}
 
-        # Idempotency — if we're already at the target terminal status,
-        # accept and skip (pymtz may retry on transient 5xx).
-        if order.payment_status.value == our_status:
-            return {"received": True, "action": "already_" + our_status}
+        if order.payment_status == PaymentStatus.paid:
+            return {"received": True}   # raced with another path — skip
 
         if order.payment_status == PaymentStatus.pending:
-            order.payment_status = PaymentStatus(our_status)
+            order.payment_status = PaymentStatus.paid
+            order.paid_at        = datetime.now(timezone.utc)
             order.payment_ref    = payment_id or order.payment_ref
-            if our_status == "paid":
-                order.paid_at       = datetime.now(timezone.utc)
-                order.payment_notes = f"pymtz {payment_id} completed (event {event_id})."
-                should_create_shopify = True
-                logger.info(f"✅ Card payment confirmed (pymtz): order {order.id}")
-            elif our_status == "failed":
-                order.payment_notes = f"pymtz {payment_id} failed (event {event_id})."
-            elif our_status == "expired":
-                order.payment_notes = f"pymtz {payment_id} expired (event {event_id})."
+            order.payment_notes  = f"pymtz {payment_id} succeeded (cross-verified)."
+            should_create_shopify = True
+            logger.info(f"✅ Card payment confirmed (pymtz): order {order.id}")
         await db.commit()
 
+    # ── Downstream — Shopify create + affiliate webhook ──────────────────────
     if should_create_shopify:
         async with AsyncSessionLocal() as db:
             from sqlalchemy.orm import selectinload
@@ -593,7 +581,7 @@ async def pymtz_webhook(
                 except Exception as e:
                     logger.exception(f"Shopify auto-create failed for {order.id} (pymtz): {e}")
 
-    return {"received": True, "action": our_status}
+    return {"received": True}
 
 # ─── POST /webhooks/whop ──────────────────────────────────────────────────────
 # Whop fires this when an embedded-checkout payment completes/fails/refunds.
@@ -936,12 +924,12 @@ async def highriskify_callback(
 # Auth.net dashboard, fraud holds released/declined, etc.
 #
 # Auth.net events we care about:
-#   net.authorize.payment.authcapture.created  — charge completed
-#   net.authorize.payment.refund.created       — refund issued
-#   net.authorize.payment.void.created         — void issued
-#   net.authorize.payment.fraud.held           — held by AFDS
-#   net.authorize.payment.fraud.approved       — admin released the hold
-#   net.authorize.payment.fraud.declined       — admin rejected the hold
+#   net.authorize.payment.authcapture.created  → charge completed
+#   net.authorize.payment.refund.created       → refund issued
+#   net.authorize.payment.void.created         → void issued
+#   net.authorize.payment.fraud.held           → held by AFDS
+#   net.authorize.payment.fraud.approved       → admin released the hold
+#   net.authorize.payment.fraud.declined       → admin rejected the hold
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/authnet")
@@ -1044,7 +1032,7 @@ async def authnet_webhook(request: Request):
                 f" | [webhook] fraud.approved at {datetime.now(timezone.utc).isoformat()}"
             )[:1000]
             await db.commit()
-            logger.info(f"[authnet webhook] order {order.id} fraud hold released — paid")
+            logger.info(f"[authnet webhook] order {order.id} fraud hold released → paid")
 
         elif event_type == "net.authorize.payment.fraud.declined":
             # Admin rejected the hold — charge voided.
@@ -1054,7 +1042,7 @@ async def authnet_webhook(request: Request):
                 f" | [webhook] fraud.declined at {datetime.now(timezone.utc).isoformat()}"
             )[:1000]
             await db.commit()
-            logger.info(f"[authnet webhook] order {order.id} fraud hold rejected — failed")
+            logger.info(f"[authnet webhook] order {order.id} fraud hold rejected → failed")
 
         else:
             logger.info(f"[authnet webhook] unhandled event type: {event_type}")
@@ -1071,11 +1059,11 @@ async def authnet_webhook(request: Request):
 #   2. Notification for after-the-fact events (refunds from dashboard, etc.)
 #
 # Stripe events we care about:
-#   payment_intent.succeeded             — charge completed
-#   payment_intent.payment_failed        — charge failed
-#   payment_intent.canceled              — charge canceled
-#   charge.refunded                      — refund issued
-#   charge.dispute.created               — chargeback opened
+#   payment_intent.succeeded             → charge completed
+#   payment_intent.payment_failed        → charge failed
+#   payment_intent.canceled              → charge canceled
+#   charge.refunded                      → refund issued
+#   charge.dispute.created               → chargeback opened
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.post("/stripe_direct")
@@ -1494,7 +1482,7 @@ async def whop_webhook(
             # Backfill customer info from the Whop webhook payload if the
             # customer skipped our form fields (typed only inside the iframe).
             # Whop's payload includes user/customer info that we can use to
-            # avoid empty email/name → Shopify create fails on missing fields,
+            # avoid empty email/name — Shopify create fails on missing fields,
             # and our Resend confirmation can't address the customer.
             _whop_fill_customer_from_payload(order, payload, data)
 

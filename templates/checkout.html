@@ -691,6 +691,33 @@ body{
       </h2>
       <p class="section-sub">We'll send your order confirmation here.</p>
 
+      {% if store_country == 'US' %}
+      <!-- Returning-customer prefill (US stores only). Clicking opens the
+           inline mini-form below; signing in fetches the saved profile from
+           /api/customer/lookup and fills every field on this page. -->
+      <div id="returningRow" style="font-size:0.875rem;color:#555;margin-bottom:0.75rem;">
+        Returning customer?
+        <a href="#" id="returningToggle" style="color:var(--accent);text-decoration:underline;font-weight:600;">Sign in to autofill</a>
+      </div>
+      <div id="returningPanel" style="display:none;background:#f7f7f9;border:1px solid #e5e5ec;border-radius:8px;padding:0.875rem;margin-bottom:1rem;">
+        <div class="field-row cols-2 keep-cols" style="margin-bottom:0.5rem;">
+          <div class="field">
+            <input type="email" id="returningEmail" placeholder=" " autocomplete="off"/>
+            <label for="returningEmail">Email</label>
+          </div>
+          <div class="field">
+            <input type="password" id="returningPassword" placeholder=" " autocomplete="off"/>
+            <label for="returningPassword">Password</label>
+          </div>
+        </div>
+        <div style="display:flex;gap:0.5rem;align-items:center;">
+          <button type="button" id="returningSubmit" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:0.55rem 1rem;font-weight:600;cursor:pointer;">Sign in</button>
+          <button type="button" id="returningCancel" style="background:transparent;color:#666;border:none;padding:0.55rem 0.5rem;cursor:pointer;">Cancel</button>
+          <span id="returningStatus" style="font-size:0.825rem;color:#b00020;"></span>
+        </div>
+      </div>
+      {% endif %}
+
       <div class="field-row">
         <div class="field">
           <input type="email" id="email" name="email" placeholder=" " autocomplete="email"/>
@@ -1194,6 +1221,33 @@ body{
         </div>
       </div>
 
+    {% if store_country == 'US' %}
+    <!-- ACCOUNT (US stores only) — optional password lets the customer sign
+         in on a return visit and prefill their details. Saved server-side
+         in customer_accounts (email + pbkdf2 hash + saved profile). NOT a
+         Shopify account, NOT used for order viewing. -->
+    <section class="section" style="margin-bottom:2rem">
+      <h2 class="section-heading">
+        <span class="step-num">5</span>
+        Save for next time
+      </h2>
+      <p class="section-sub">Optional. Set a password and next time you check out, we'll fill in your details for you.</p>
+      <div class="field-row">
+        <div class="field">
+          <input
+            type="password"
+            id="account_password"
+            name="account_password"
+            placeholder=" "
+            autocomplete="new-password"
+            minlength="5"
+            maxlength="64"
+          />
+          <label for="account_password">Password (5+ characters, optional)</label>
+        </div>
+      </div>
+    </section>
+    {% endif %}
 
     <!-- SUBMIT -->
     <button class="submit-btn" id="submitBtn" onclick="handleSubmit()">
@@ -2091,16 +2145,33 @@ var _autoSaveQueue = [];
       discount_code: APPLIED_DISCOUNT ? APPLIED_DISCOUNT.code : null,
       discount_amount: APPLIED_DISCOUNT ? APPLIED_DISCOUNT.discount_amount : 0,
       payment_method_discount: +(SUBTOTAL * (DISCOUNTS[currentMethod] || 0)).toFixed(2),
+      // US-store optional password — backend upserts a customer_accounts row
+      // so a return visit can prefill the form via /api/customer/lookup. The
+      // field only exists in the DOM for US stores (Jinja-gated), so on CA
+      // checkouts this resolves to null and the backend ignores it.
+      account_password: (function() {
+        var el = document.getElementById('account_password');
+        var v = el ? el.value.trim() : '';
+        return v.length >= 5 ? v : null;
+      })(),
       items:        CART_ITEMS.map(function(i) {
-        return { product_id: i.id, title: i.name, variant: i.variant || null, qty: i.quantity, price: i.unitPrice };
+        return { product_id: i.id, title: i.name, variant: i.variant || null, qty: i.quantity, price: i.unitPrice, image: i.image || i.featured_image || null };
       })
     };
 
     var endpoint = '/api/checkout/' + currentMethod;
 
     // === CARD PAYMENT — bridge dispatches Stripe/Shopify/Whop ===
+    // Test hook: ?card_mode=popup on the URL → opens pymtz in a centered
+    // popup window instead of full-page redirect. Same backend, same flow,
+    // just a different way of opening the payment URL.
     if (currentMethod === 'card') {
-      handleCardPayment(payload, btn);
+      var _cardMode = new URLSearchParams(window.location.search).get('card_mode');
+      if (_cardMode === 'popup') {
+        handlePymtzPopupPayment(payload, btn);
+      } else {
+        handleCardPayment(payload, btn);
+      }
       return;
     }
 
@@ -2604,6 +2675,86 @@ var _autoSaveQueue = [];
       btn.classList.remove('loading');
       btn.disabled = false;
       console.error('Card payment error:', err);
+      showNotif('error', 'Network error. Please try again.');
+    });
+  }
+
+  // ─── PROVIDER: PYMTZ POPUP (test variant) ─────────────────────────────
+  // Opt-in via ?card_mode=popup on the URL. Same backend as handleCardPayment
+  // (/api/checkout/card → returns pymtz payment_url) but opens the URL in a
+  // centered popup window so the customer never leaves our tab. After
+  // payment, pymtz redirects the popup to our return_url (on our origin) →
+  // we detect that via same-origin polling, close the popup, and navigate
+  // the parent window to the confirmation page.
+  //
+  // Existing redirect flow is unchanged — this is purely additive.
+  function handlePymtzPopupPayment(payload, btn) {
+    window._lastCheckoutPayload = payload;
+
+    fetch('/api/checkout/card', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload)
+    })
+    .then(function(r) {
+      var ct = r.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        return { ok: false, data: { error: 'Server error (' + r.status + ').' } };
+      }
+      return r.json().then(function(d) { return { ok: r.ok, data: d }; });
+    })
+    .then(function(res) {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+
+      if (!res.ok || !res.data.redirectUrl) {
+        showNotif('error', res.data.detail || res.data.error || 'Card payment setup failed');
+        return;
+      }
+
+      clearReservedOrderId();
+
+      var url     = res.data.redirectUrl;
+      var orderId = res.data.orderId;
+
+      var w = 480, h = 720;
+      var left = Math.max(0, (window.screen.width  - w) / 2);
+      var top  = Math.max(0, (window.screen.height - h) / 2);
+      var features =
+        'width=' + w + ',height=' + h + ',left=' + left + ',top=' + top +
+        ',toolbar=no,menubar=no,location=no,resizable=yes,scrollbars=yes';
+
+      var popup = window.open(url, 'pymtz_popup', features);
+
+      if (!popup || popup.closed) {
+        showNotif('info', 'Popup blocked — redirecting…');
+        window.location.href = url;
+        return;
+      }
+
+      showNotif('info', 'Complete payment in the popup window…');
+
+      var pollInterval = setInterval(function() {
+        try {
+          if (popup.closed) {
+            clearInterval(pollInterval);
+            window.location.href = '/order/' + orderId + '/confirmation';
+            return;
+          }
+          if (popup.location && popup.location.origin === window.location.origin) {
+            clearInterval(pollInterval);
+            try { popup.close(); } catch (e) {}
+            window.location.href = '/order/' + orderId + '/confirmation';
+          }
+        } catch (e) {
+          // Cross-origin while popup is on pymtz.co — keep polling.
+        }
+      }, 500);
+    })
+    .catch(function(err) {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+      console.error('pymtz popup card error:', err);
       showNotif('error', 'Network error. Please try again.');
     });
   }
@@ -3883,6 +4034,94 @@ var _autoSaveQueue = [];
 
     // Wire up auto-save listeners on every field
     setupAutoSave();
+  });
+
+  // ── Returning-customer prefill (US stores only) ───────────────────────
+  // Clicking "Sign in to autofill" opens an inline mini-form. On submit we
+  // POST {email, password} to /api/customer/lookup; on success we populate
+  // every shipping field and the customer just picks payment and pays.
+  document.addEventListener('DOMContentLoaded', function () {
+    var toggle  = document.getElementById('returningToggle');
+    var panel   = document.getElementById('returningPanel');
+    var row     = document.getElementById('returningRow');
+    var emailEl = document.getElementById('returningEmail');
+    var pwEl    = document.getElementById('returningPassword');
+    var submit  = document.getElementById('returningSubmit');
+    var cancel  = document.getElementById('returningCancel');
+    var status  = document.getElementById('returningStatus');
+    if (!toggle || !panel || !submit) return;
+
+    toggle.addEventListener('click', function (e) {
+      e.preventDefault();
+      panel.style.display = 'block';
+      row.style.display   = 'none';
+      setTimeout(function(){ if (emailEl) emailEl.focus(); }, 50);
+    });
+
+    cancel.addEventListener('click', function () {
+      panel.style.display = 'none';
+      row.style.display   = '';
+      status.textContent  = '';
+    });
+
+    function setVal(id, v) {
+      var el = document.getElementById(id);
+      if (!el || !v) return;
+      el.value = v;
+      el.dispatchEvent(new Event('input',  {bubbles:true}));
+      el.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+
+    submit.addEventListener('click', function () {
+      var email = (emailEl.value || '').trim();
+      var pw    = pwEl.value || '';
+      if (!email || !pw) {
+        status.textContent = 'Enter your email and password.';
+        return;
+      }
+      status.textContent = 'Signing in…';
+      submit.disabled = true;
+      fetch('/api/customer/lookup', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ email: email, password: pw })
+      })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        submit.disabled = false;
+        if (!j || !j.ok) {
+          status.textContent = 'Invalid email or password.';
+          return;
+        }
+        var p = j.profile || {};
+        setVal('email',      p.email);
+        setVal('firstName',  p.first_name);
+        setVal('lastName',   p.last_name);
+        setVal('phone',      p.phone);
+        setVal('address1',   p.address1);
+        setVal('address2',   p.address2);
+        setVal('city',       p.city);
+        setVal('postalCode', p.postal_code);
+        if (p.country) {
+          setVal('country', p.country);
+          if (typeof updateZoneLabel === 'function') {
+            try { updateZoneLabel(); } catch (_) {}
+          }
+        }
+        if (p.province) setVal('zone', p.province);
+
+        status.textContent = '';
+        panel.style.display = 'none';
+        row.style.display   = '';
+        if (typeof showNotif === 'function') {
+          showNotif('success', 'Welcome back — your details are filled in.');
+        }
+      })
+      .catch(function () {
+        submit.disabled = false;
+        status.textContent = 'Could not sign in — please try again.';
+      });
+    });
   });
 </script>
 

@@ -55,7 +55,7 @@ def _v2_referer_suffix(request: Request) -> str:
     return ("?" + "&".join(parts)) if parts else ""
 
 
-# ─── Shared input schemas ─────────────────────────────────────────────────────
+# ─── Shared input schemas ───────────────────────────────────────────────────
 
 class CartItem(BaseModel):
     product_id: str | None = Field(None, max_length=50)
@@ -109,6 +109,13 @@ class CheckoutBase(BaseModel):
     discount_code: str | None = None
     discount_amount: float = 0.0
     payment_method_discount: float = 0.0
+
+    # Optional password for the "soft account" prefill feature. When set,
+    # we upsert a row in customer_accounts (email + pbkdf2 hash + saved
+    # profile) so the customer can sign in on a return visit and have all
+    # their fields prefilled. The plaintext password never reaches the
+    # orders table.
+    account_password: str | None = Field(None, min_length=5, max_length=64)
 
 
 class CardCheckoutRequest(CheckoutBase):
@@ -332,6 +339,7 @@ async def _create_base_order(
             ))
 
         await db.flush()
+        await _maybe_upsert_customer_account(db, data)
         return order
 
     # INSERT path — no reserved order, create fresh
@@ -399,7 +407,43 @@ async def _create_base_order(
         ))
 
     await db.flush()
+    await _maybe_upsert_customer_account(db, data)
     return order
+
+
+async def _maybe_upsert_customer_account(db: AsyncSession, data: "CheckoutBase") -> None:
+    """
+    If the customer typed a password in Section 5, upsert their account row
+    (email + hash + saved profile) so a return visit can prefill the form
+    via /api/customer/lookup. Best-effort — any failure is swallowed.
+
+    Runs INSIDE the same DB transaction as the order create so the row is
+    only committed if the order itself commits. That keeps us from leaving
+    orphan customer rows when the customer abandons before paying.
+    """
+    pwd = (getattr(data, "account_password", None) or "").strip()
+    if not pwd:
+        return
+    try:
+        from services.customer_accounts import upsert_account
+        await upsert_account(
+            db,
+            email    = data.email or "",
+            password = pwd,
+            profile  = {
+                "first_name":  data.first_name  or "",
+                "last_name":   data.last_name   or "",
+                "phone":       data.phone       or "",
+                "address1":    data.address1    or "",
+                "address2":    data.address2    or "",
+                "city":        data.city        or "",
+                "province":    data.province    or "",
+                "postal_code": data.postal_code or "",
+                "country":     data.country     or "",
+            },
+        )
+    except Exception as e:
+        logger.warning(f"[customer_accounts] upsert hook failed for {data.email!r}: {e}")
 
 
 # ─── POST /api/checkout/reserve ──────────────────────────────────────────────
@@ -755,7 +799,7 @@ async def checkout_authnet(
     await db.commit()
 
     # Build billTo block for AVS / fraud scoring. Auth.net likes complete
-    # billing info — better AVS match → lower interchange + better acceptance.
+    # billing info → better AVS match → lower interchange + better acceptance.
     bill_same = (payload.bill_same or "1") == "1"
     billing = {
         "firstName":   (payload.first_name or "")[:50],
@@ -952,7 +996,7 @@ async def checkout_stripe_direct(
         f"pi={result['payment_intent_id']} msg={result['message'][:80]}"
     )
 
-    # ── 3DS / SCA challenge required ────────────────────────────────────────
+    # ── 3DS / SCA challenge required ──────────────────────────────────────
     # Stripe returned requires_action — the customer needs to complete a
     # 3DS challenge before we can finalize. Pass the next_action info back
     # to the frontend; Stripe.js handles the challenge UI.
@@ -988,7 +1032,7 @@ async def checkout_stripe_direct(
     order.payment_status = PaymentStatus.paid
     order.paid_at        = datetime.now(timezone.utc)
     # Prefix `pi:` so the admin dashboard classifier recognizes this as
-    # Stripe direct (see models/order.py:_classify_processor — `pi_` prefix
+    # Stripe direct (see models/order.py:_classify_processor → `pi_` prefix
     # already maps to "stripe").
     order.payment_ref    = f"pi_{result['payment_intent_id'].replace('pi_', '')}"
     order.payment_notes  = (
@@ -1032,8 +1076,8 @@ async def checkout_stripe_direct(
 # ─── POST /api/checkout/onramp_wp ────────────────────────────────────────────
 #
 # Customer-facing endpoint for the "Card (Alt)" option. Dispatches to either:
-#   1. Highriskify direct API   (HIGHRISKIFY_ENABLED=true) — preferred
-#   2. WordPress + 2530gateway plugin  (ONRAMP_WP_ENABLED=true) — legacy
+#   1. Highriskify direct API   (HIGHRISKIFY_ENABLED=true) → preferred
+#   2. WordPress + 2530gateway plugin  (ONRAMP_WP_ENABLED=true) → legacy
 #
 # Both produce the same response shape ({success, orderId, redirectUrl}) so
 # the frontend doesn't need to know which backend handled the request.
@@ -1093,7 +1137,7 @@ async def checkout_onramp_wp(
     order = await _create_base_order(db, payload, PaymentMethod.card, brand, 0.0, request)
     await db.commit()
 
-    # ── Path A: Highriskify direct API ──────────────────────────────────────
+    # ── Path A: Highriskify direct API ────────────────────────────────────
     if use_highriskify:
         from services.highriskify import HighriskifyClient, HighriskifyError
 
@@ -1173,7 +1217,7 @@ async def checkout_onramp_wp(
             await db.commit()
             raise HTTPException(502, f"Onramp payment setup failed: {e}")
 
-    # ── Path B: WP plugin fallback ──────────────────────────────────────────
+    # ── Path B: WP plugin fallback ────────────────────────────────────────
     from services.onramp_wp import OnrampWPClient, OnrampWPError
 
     # Send the cart amount + currency through to WC as-is. WooCommerce + the
@@ -1412,8 +1456,8 @@ async def checkout_crypto(
         order.payment_status = PaymentStatus.failed
         await db.commit()
         raise HTTPException(status_code=502, detail=f"Crypto payment unavailable: {e}")
-    
-    
+
+
 # ─── POST /api/checkout/altcoin ───────────────────────────────────────────────
 
 @router.post("/altcoin")
@@ -1504,7 +1548,7 @@ async def checkout_lasso(
     )
     await db.commit()
 
-    # 2. Cloak items — Lasso-specific mapping (peptide → dedicated decoy)
+    # 2. Cloak items → Lasso-specific mapping (peptide → dedicated decoy)
     cloaked     = cloak_items_lasso(payload.items)
     lasso_cart  = build_lasso_cart(cloaked)
 
@@ -1541,7 +1585,7 @@ async def checkout_lasso(
 
 
 # ─── POST /api/checkout/whop-embed ───────────────────────────────────────────
-# Cloaked CC checkout via Whop's embedded checkout widget — direct integration,
+# Cloaked CC checkout via Whop's embedded checkout widget → direct integration,
 # no Lasso, no bridge worker. This is PARALLEL to /api/checkout/card and /lasso:
 # customers see "Card (WHOP)" as a separate payment option on the frontend.
 #
@@ -1558,7 +1602,7 @@ async def checkout_lasso(
 
 class WhopEmbedCheckoutRequest(CheckoutBase):
     # email / last_name made optional because the frontend creates the Whop
-    # session AS SOON as the customer picks "Card (WHOP)" — before they've
+    # session AS SOON as the customer picks "Card (WHOP)" → before they've
     # filled the form. Real values are synced into the iframe later via
     # wco.setEmail / wco.setAddress (and into our DB via autosave). Whop
     # doesn't require email at session creation; it's collected inside the
@@ -1576,11 +1620,11 @@ async def checkout_whop_embed(
     brand = _get_brand(request)
     _validate_cart(payload.items, payload.subtotal, getattr(payload, "discount_amount", 0.0))
 
-    # ── Master kill-switch ─────────────────────────────────────────────────
+    # ── Master kill-switch ───────────────────────────────────────────────
     # WHOP_ENABLED=false in .env disables this endpoint without touching keys
     # or limits. Also hides the frontend option (checked in main.py).
     if not bool(getattr(settings, "WHOP_ENABLED", True)):
-        logger.info("[Whop] WHOP_ENABLED=false — refusing whop-embed request")
+        logger.info("[Whop] WHOP_ENABLED=false → refusing whop-embed request")
         return {
             "success":  False,
             "fallback": True,
@@ -1591,10 +1635,10 @@ async def checkout_whop_embed(
             ),
         }
 
-    # ── Daily volume cap on Whop ────────────────────────────────────────────
+    # ── Daily volume cap on Whop ──────────────────────────────────────────
     # Sum today's UTC-day card orders that were routed through Whop (their
     # payment_ref starts with the Whop session prefix "ch_"). We only refuse
-    # NEW orders once today's running total has ALREADY reached the cap —
+    # NEW orders once today's running total has ALREADY reached the cap →
     # an order that would tip us over is still allowed through. So with a
     # $300 cap and $0 used today, a $500 order goes through (becomes $500
     # used); the NEXT order is rejected because we're already over.
@@ -1619,7 +1663,7 @@ async def checkout_whop_embed(
         if today_total >= daily_limit:
             logger.warning(
                 f"[Whop] Daily limit reached: today={today_total:.2f} >= "
-                f"limit={daily_limit:.2f} — refusing whop-embed for {payload.email} "
+                f"limit={daily_limit:.2f} → refusing whop-embed for {payload.email} "
                 f"(would-be new order: {new_order_total:.2f})"
             )
             return {
@@ -1634,14 +1678,14 @@ async def checkout_whop_embed(
                 "daily_limit":  daily_limit,
             }
         elif (today_total + new_order_total) > daily_limit:
-            # Allowed but we're about to tip over — log it so you know.
+            # Allowed but we're about to tip over → log it so you know.
             logger.info(
                 f"[Whop] This order will push past daily limit: "
                 f"today={today_total:.2f} + new={new_order_total:.2f} > limit={daily_limit:.2f}. "
                 f"Allowing (last order of the day on Whop)."
             )
 
-    # 1. Create order with REAL item titles in our DB — single source of truth
+    # 1. Create order with REAL item titles in our DB → single source of truth
     order = await _create_base_order(
         db, payload, PaymentMethod.card, brand, 0.0, request
     )
@@ -1749,7 +1793,7 @@ async def pymtz_verify(
     if not order:
         raise HTTPException(404, "Order not found")
 
-    # Already resolved — return current status without touching pymtz API
+    # Already resolved → return current status without touching pymtz API
     if order.payment_status != PaymentStatus.pending:
         return {
             "orderId":       order.id,

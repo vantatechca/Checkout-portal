@@ -451,6 +451,8 @@ from routes.auth_routes import router as auth_router
 app.include_router(auth_router)
 from routes.revenue import router as revenue_router
 app.include_router(revenue_router)
+from routes.customer import router as customer_router
+app.include_router(customer_router)
 
 # Static files (CSS, JS, images if any)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -597,9 +599,11 @@ async def checkout_page(request: Request):
 
     # CSV per-store overrides (None = no override, fall back to default)
     card_enabled    = _store_cfg.is_enabled(source_domain, "card",    _env_card)
-    # pymtz (the underlying card processor for the "card" method) is US-only.
-    # Any CA store has card hidden even if listed in CARD_ENABLED_STORES.
-    if country != "US":
+    # Card method disabled on US AND CA stores.
+    #   - US: disabled per business decision (e.g. processor switch / risk)
+    #   - CA: pymtz integration was originally US-only — never had a CA path
+    # To re-enable for a country, remove that branch.
+    if country in ("US", "CA"):
         card_enabled = False
 
     whop_enabled_pre = _store_cfg.is_enabled(source_domain, "whop",   _env_whop)
