@@ -2,18 +2,22 @@
 Admin authentication routes - server-side session based
 """
 import os
+import time
 import secrets
+import logging
 from typing import Optional
 
 from dotenv import load_dotenv
 load_dotenv()
 
 import redis.asyncio as aioredis
+from redis.exceptions import RedisError
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, FileResponse
 from pydantic import BaseModel
 
 router = APIRouter()
+logger = logging.getLogger("auth")
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME") or ""
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD") or ""
@@ -25,29 +29,75 @@ SESSION_TTL_SEC = 2 * 3600
 SESSION_COOKIE  = "admin_session"
 SESSION_PREFIX  = "admin_sess:"
 
+# When Redis is unreachable (e.g. on Render without a Redis add-on), we fall
+# back to an in-process session store. Sessions then live only for the lifetime
+# of the process (reset on redeploy/spin-down), which is fine for a single
+# admin. If REDIS_URL points at a real, reachable Redis, that is used instead
+# and sessions survive restarts.
 _redis: Optional[aioredis.Redis] = None
+_use_memory = False
+_mem_sessions: dict[str, float] = {}   # token -> expiry epoch seconds
 
-async def get_redis() -> aioredis.Redis:
+
+def _mem_purge() -> None:
+    now = time.time()
+    for tok in [t for t, exp in _mem_sessions.items() if exp <= now]:
+        _mem_sessions.pop(tok, None)
+
+
+async def get_redis() -> Optional[aioredis.Redis]:
     global _redis
+    if _use_memory:
+        return None
     if _redis is None:
         _redis = aioredis.from_url(REDIS_URL, decode_responses=True)
     return _redis
 
+
+def _fallback_to_memory(exc: Exception) -> None:
+    global _use_memory
+    if not _use_memory:
+        _use_memory = True
+        logger.warning("Redis unavailable (%s) — using in-memory admin sessions", exc)
+
+
 async def create_session() -> str:
     token = secrets.token_hex(32)
-    r = await get_redis()
-    await r.set(SESSION_PREFIX + token, "1", ex=SESSION_TTL_SEC)
+    try:
+        r = await get_redis()
+        if r is not None:
+            await r.set(SESSION_PREFIX + token, "1", ex=SESSION_TTL_SEC)
+            return token
+    except (RedisError, OSError) as exc:
+        _fallback_to_memory(exc)
+    _mem_purge()
+    _mem_sessions[token] = time.time() + SESSION_TTL_SEC
     return token
+
 
 async def validate_session(token: Optional[str]) -> bool:
     if not token:
         return False
-    r = await get_redis()
-    return await r.get(SESSION_PREFIX + token) is not None
+    try:
+        r = await get_redis()
+        if r is not None:
+            return await r.get(SESSION_PREFIX + token) is not None
+    except (RedisError, OSError) as exc:
+        _fallback_to_memory(exc)
+    _mem_purge()
+    exp = _mem_sessions.get(token)
+    return exp is not None and exp > time.time()
+
 
 async def delete_session(token: str) -> None:
-    r = await get_redis()
-    await r.delete(SESSION_PREFIX + token)
+    try:
+        r = await get_redis()
+        if r is not None:
+            await r.delete(SESSION_PREFIX + token)
+            return
+    except (RedisError, OSError) as exc:
+        _fallback_to_memory(exc)
+    _mem_sessions.pop(token, None)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
