@@ -119,7 +119,7 @@ async def btcpay_webhook(
         # Update crypto invoice
         inv_rec.status = btcpay_status
         if our_status == "paid":
-            inv_rec.settled_at = datetime.now(timezone.utc)
+            inv_rec.settled_at = datetime.utcnow()
 
         # Update parent order
         order_result = await db.execute(select(Order).where(Order.id == inv_rec.order_id))
@@ -129,7 +129,7 @@ async def btcpay_webhook(
         if order and order.payment_status == PaymentStatus.pending:
             order.payment_status = PaymentStatus(our_status)
             if our_status == "paid":
-                order.paid_at = datetime.now(timezone.utc)
+                order.paid_at = datetime.utcnow()
                 order.payment_notes = f"BTCPay invoice {btcpay_id} settled."
                 logger.info(f"✅ Crypto payment confirmed: order {order.id}")
                 should_create_shopify = True
@@ -248,7 +248,7 @@ async def shopify_paid_webhook(request: Request):
             return {"received": True, "action": "already_paid"}
 
         order.payment_status = PaymentStatus.paid
-        order.paid_at        = datetime.now(timezone.utc)
+        order.paid_at        = datetime.utcnow()
         order.payment_ref    = shopify_order_id
         order.payment_notes  = f"Matched to Shopify order {shopify_name} on {shop_domain}"
         await db.commit()
@@ -378,7 +378,7 @@ async def nowpayments_ipn(
         inv_rec.status        = np_status
         inv_rec.coin          = pay_currency
         if our_status == "paid":
-            inv_rec.settled_at = datetime.now(timezone.utc)
+            inv_rec.settled_at = datetime.utcnow()
 
         order_result = await db.execute(select(Order).where(Order.id == order_id))
         order = order_result.scalar_one_or_none()
@@ -387,7 +387,7 @@ async def nowpayments_ipn(
         if order and order.payment_status == PaymentStatus.pending:
             order.payment_status = PaymentStatus(our_status)
             if our_status == "paid":
-                order.paid_at       = datetime.now(timezone.utc)
+                order.paid_at       = datetime.utcnow()
                 order.payment_notes = f"NowPayments {np_payment_id} finished ({pay_currency})."
                 logger.info(f"✅ Altcoin payment confirmed: order {order.id}")
                 should_create_shopify = True
@@ -554,7 +554,7 @@ async def pymtz_webhook(request: Request):
 
         if order.payment_status == PaymentStatus.pending:
             order.payment_status = PaymentStatus.paid
-            order.paid_at        = datetime.now(timezone.utc)
+            order.paid_at        = datetime.utcnow()
             order.payment_ref    = payment_id or order.payment_ref
             order.payment_notes  = f"pymtz {payment_id} succeeded (cross-verified)."
             should_create_shopify = True
@@ -861,7 +861,7 @@ async def highriskify_callback(
 
         # Mark paid + record txids in payment_notes for reconciliation
         order.payment_status = PaymentStatus.paid
-        order.paid_at        = datetime.now(timezone.utc)
+        order.paid_at        = datetime.utcnow()
         order.payment_ref    = f"hr:{address_in or order.payment_ref or ''}"
         order.payment_notes  = (
             f"highriskify paid · value_coin={value_coin} {coin} · "
@@ -906,7 +906,7 @@ async def highriskify_callback(
                         "txid_in":          txid_in,
                         "txid_out":         txid_out,
                         "merchant_wallet":  hr.merchant_wallet,
-                        "confirmed_at":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        "confirmed_at":     datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                     })
                 except Exception as e:
                     logger.warning(f"highriskify IPT confirm failed: {e}")
@@ -980,10 +980,10 @@ async def authnet_webhook(request: Request):
             # between server and customer.
             if order.payment_status != PaymentStatus.paid:
                 order.payment_status = PaymentStatus.paid
-                order.paid_at        = datetime.now(timezone.utc)
+                order.paid_at        = datetime.utcnow()
                 order.payment_notes  = (
                     (order.payment_notes or "") +
-                    f" | [webhook] authcapture.created confirmed at {datetime.now(timezone.utc).isoformat()}"
+                    f" | [webhook] authcapture.created confirmed at {datetime.utcnow().isoformat()}"
                 )[:1000]
                 await db.commit()
                 logger.info(f"✅ [authnet webhook] order {order.id} marked paid (sync had failed)")
@@ -997,7 +997,7 @@ async def authnet_webhook(request: Request):
             order.payment_status = PaymentStatus.refunded
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] refund.created amount={refund_amount} at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] refund.created amount={refund_amount} at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[authnet webhook] order {order.id} marked refunded ({refund_amount})")
@@ -1007,7 +1007,7 @@ async def authnet_webhook(request: Request):
             order.payment_status = PaymentStatus.refunded   # we don't have a 'voided' status
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] void.created at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] void.created at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[authnet webhook] order {order.id} marked refunded (void)")
@@ -1018,7 +1018,7 @@ async def authnet_webhook(request: Request):
             order.payment_status = PaymentStatus.pending
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] fraud.held at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] fraud.held at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[authnet webhook] order {order.id} held for fraud review")
@@ -1026,10 +1026,10 @@ async def authnet_webhook(request: Request):
         elif event_type == "net.authorize.payment.fraud.approved":
             # Admin released the hold — charge proceeds.
             order.payment_status = PaymentStatus.paid
-            order.paid_at        = datetime.now(timezone.utc)
+            order.paid_at        = datetime.utcnow()
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] fraud.approved at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] fraud.approved at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[authnet webhook] order {order.id} fraud hold released → paid")
@@ -1039,7 +1039,7 @@ async def authnet_webhook(request: Request):
             order.payment_status = PaymentStatus.failed
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] fraud.declined at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] fraud.declined at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[authnet webhook] order {order.id} fraud hold rejected → failed")
@@ -1117,10 +1117,10 @@ async def stripe_direct_webhook(request: Request):
         if event_type == "payment_intent.succeeded":
             if order.payment_status != PaymentStatus.paid:
                 order.payment_status = PaymentStatus.paid
-                order.paid_at        = datetime.now(timezone.utc)
+                order.paid_at        = datetime.utcnow()
                 order.payment_notes  = (
                     (order.payment_notes or "") +
-                    f" | [webhook] payment_intent.succeeded at {datetime.now(timezone.utc).isoformat()}"
+                    f" | [webhook] payment_intent.succeeded at {datetime.utcnow().isoformat()}"
                 )[:1000]
                 await db.commit()
                 logger.info(f"✅ [stripe_direct webhook] order {order.id} marked paid (sync had failed)")
@@ -1142,7 +1142,7 @@ async def stripe_direct_webhook(request: Request):
             order.payment_status = PaymentStatus.failed
             order.payment_notes  = (
                 (order.payment_notes or "") +
-                f" | [webhook] payment_intent.canceled at {datetime.now(timezone.utc).isoformat()}"
+                f" | [webhook] payment_intent.canceled at {datetime.utcnow().isoformat()}"
             )[:1000]
             await db.commit()
             logger.info(f"[stripe_direct webhook] order {order.id} marked failed (canceled)")
@@ -1268,7 +1268,7 @@ async def onramp_wp_webhook(
             order.payment_status = PaymentStatus(our_status)
             order.payment_ref    = f"wc:{wc_order_id}"
             if our_status == "paid":
-                order.paid_at       = datetime.now(timezone.utc)
+                order.paid_at       = datetime.utcnow()
                 order.payment_notes = f"onramp_wp WC #{wc_order_id} {wc_status}."
                 should_create_shopify = True
                 logger.info(f"✅ Card payment confirmed (onramp_wp): order {order.id} / WC #{wc_order_id}")
@@ -1487,7 +1487,7 @@ async def whop_webhook(
             _whop_fill_customer_from_payload(order, payload, data)
 
             if our_status == "paid":
-                order.paid_at       = datetime.now(timezone.utc)
+                order.paid_at       = datetime.utcnow()
                 order.payment_notes = f"Whop payment {whop_id} completed."
                 should_create_shopify = True
                 logger.info(f"✅ Whop payment confirmed: order {order.id}")

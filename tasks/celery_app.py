@@ -144,14 +144,14 @@ async def _match_emails_to_orders(emails: list[dict]) -> dict:
 
             # ✅ Match confirmed — update order
             order.payment_status = PaymentStatus.paid
-            order.paid_at        = datetime.now(timezone.utc)
+            order.paid_at        = datetime.utcnow()
             order.payment_notes  = f"Interac received from {email['sender']}"
 
             interac_rec = InteracPayment(
                 order_id        = order_id,
                 expected_amount = expected,
                 sender_email    = email["sender"],
-                matched_at      = datetime.now(timezone.utc),
+                matched_at      = datetime.utcnow(),
                 raw_email_id    = gmail_id,
                 status          = "matched",
             )
@@ -175,7 +175,7 @@ async def _do_expire_orders():
     from models.order import Order, PaymentStatus
     from sqlalchemy import select, update
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.ORDER_EXPIRY_HOURS)
+    cutoff = datetime.utcnow() - timedelta(hours=settings.ORDER_EXPIRY_HOURS)
 
     async with AsyncSessionLocal() as db:
         result = await db.execute(
@@ -231,7 +231,7 @@ async def _do_check_btcpay(task, order_id: str, invoice_id: str):
         if order and order.payment_status == PaymentStatus.pending:
             order.payment_status = PaymentStatus(our_status)
             if our_status == "paid":
-                order.paid_at = datetime.now(timezone.utc)
+                order.paid_at = datetime.utcnow()
 
             invoice_result = await db.execute(
                 select(CryptoInvoice).where(CryptoInvoice.btcpay_invoice_id == invoice_id)

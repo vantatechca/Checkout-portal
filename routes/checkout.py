@@ -860,7 +860,7 @@ async def checkout_authnet(
 
     # ── Charge succeeded — mark paid + downstream Shopify/affiliate ────────
     order.payment_status = PaymentStatus.paid
-    order.paid_at        = datetime.now(timezone.utc)
+    order.paid_at        = datetime.utcnow()
     # Prefix `an:` so the admin dashboard classifier recognizes this as
     # Auth.net (see models/order.py:_classify_processor).
     order.payment_ref    = f"an:{result['transaction_id']}"
@@ -1030,7 +1030,7 @@ async def checkout_stripe_direct(
 
     # ── Charge succeeded — mark paid + downstream Shopify/affiliate ────────
     order.payment_status = PaymentStatus.paid
-    order.paid_at        = datetime.now(timezone.utc)
+    order.paid_at        = datetime.utcnow()
     # Prefix `pi:` so the admin dashboard classifier recognizes this as
     # Stripe direct (see models/order.py:_classify_processor → `pi_` prefix
     # already maps to "stripe").
@@ -1646,7 +1646,7 @@ async def checkout_whop_embed(
     # compliance review surface.
     daily_limit = float(getattr(settings, "WHOP_DAILY_LIMIT", 0) or 0)
     if daily_limit > 0:
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.utcnow().replace(
             hour=0, minute=0, second=0, microsecond=0
         )
         result = await db.execute(
@@ -1822,7 +1822,7 @@ async def pymtz_verify(
     # ── Update order ──────────────────────────────────────────────────────────
     order.payment_status = PaymentStatus(our_status)
     if our_status == "paid":
-        order.paid_at       = datetime.now(timezone.utc)
+        order.paid_at       = datetime.utcnow()
         order.payment_notes = f"pymtz {order.payment_ref} confirmed via return-url verify."
     elif our_status == "failed":
         order.payment_notes = f"pymtz {order.payment_ref} failed (verify check)."

@@ -284,7 +284,7 @@ async def order_stats(
         )
     )
 
-    start_today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     paid_q = select(sa_func.count()).select_from(Order).where(
         and_(*base_filter, Order.payment_status == PaymentStatus.paid)
     )
@@ -470,13 +470,13 @@ async def mark_order_paid(
         raise HTTPException(400, "Order already marked as paid")
 
     order.payment_status = PaymentStatus.paid
-    order.paid_at        = datetime.now(timezone.utc)
+    order.paid_at        = datetime.utcnow()
     order.payment_notes  = body.notes or "Manually marked paid by admin"
 
     # If Interac, also update interac_payment record (clears underpaid flag if it was set)
     if order.payment_method == PaymentMethod.interac and order.interac_payment:
         order.interac_payment.status          = "manual"
-        order.interac_payment.matched_at      = datetime.now(timezone.utc)
+        order.interac_payment.matched_at      = datetime.utcnow()
         # If was underpaid, set received_amount to the full total now that balance is in
         if order.interac_payment.received_amount is not None:
             order.interac_payment.received_amount = order.total
@@ -484,7 +484,7 @@ async def mark_order_paid(
     # If Zelle, also update zelle_payment record (clears underpaid flag if it was set)
     if order.payment_method == PaymentMethod.zelle and order.zelle_payment:
         order.zelle_payment.status            = "manual"
-        order.zelle_payment.matched_at        = datetime.now(timezone.utc)
+        order.zelle_payment.matched_at        = datetime.utcnow()
         if order.zelle_payment.received_amount is not None:
             order.zelle_payment.received_amount = order.total
 
@@ -671,7 +671,7 @@ async def send_payment_reminder(
         else f"Reminded — full ${total:.2f} outstanding"
     )
 
-    order.last_customer_email_at = datetime.now(timezone.utc)
+    order.last_customer_email_at = datetime.utcnow()
     order.customer_emails_sent   = (order.customer_emails_sent or 0) + 1
 
     await db.commit()
@@ -857,7 +857,7 @@ async def unmark_order_paid(
     prior_notes = order.payment_notes or ""
     prior_paid_at = order.paid_at.isoformat() if order.paid_at else "unknown"
     audit_line   = (
-        f"[unmark-paid @ {datetime.now(timezone.utc).isoformat()}] "
+        f"[unmark-paid @ {datetime.utcnow().isoformat()}] "
         f"reverted from paid (paid_at={prior_paid_at}) → {target}. "
         f"Reason: {body.notes or 'no reason given'}. "
         f"Prior notes: {prior_notes[:200]}"
@@ -941,10 +941,10 @@ async def manual_interac_match(
     # Update both
     ip.order_id   = body.order_id
     ip.status     = "manual"
-    ip.matched_at = datetime.now(timezone.utc)
+    ip.matched_at = datetime.utcnow()
 
     order.payment_status = PaymentStatus.paid
-    order.paid_at        = datetime.now(timezone.utc)
+    order.paid_at        = datetime.utcnow()
     order.payment_notes  = f"Manually matched to Interac payment #{ip.id}"
 
     await db.commit()
@@ -1028,10 +1028,10 @@ async def manual_zelle_match(
 
     zp.order_id   = body.order_id
     zp.status     = "manual"
-    zp.matched_at = datetime.now(timezone.utc)
+    zp.matched_at = datetime.utcnow()
 
     order.payment_status = PaymentStatus.paid
-    order.paid_at        = datetime.now(timezone.utc)
+    order.paid_at        = datetime.utcnow()
     order.payment_notes  = f"Manually matched to Zelle payment #{zp.id}"
 
     await db.commit()
@@ -1076,7 +1076,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
     Designed to be polled every 30s; no expensive queries.
     """
     from sqlalchemy import func
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ── server ──────────────────────────────────────────────────────────────
     db_ok = True
@@ -1327,7 +1327,7 @@ async def monitoring_health(db: AsyncSession = Depends(get_db)):
         "today_kpis":     today_kpis,
         "sources":        sources,
         "recent_events":  recent_events,
-        "generated_at":   datetime.now(timezone.utc).isoformat(),
+        "generated_at":   datetime.utcnow().isoformat(),
     }
 
 

@@ -30,7 +30,7 @@ def _expiration_minutes_for(method: PaymentMethod) -> int:
 
 async def expire_stale_orders_once() -> int:
     """Single pass: scan for pending orders past expiration, flip them."""
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     expired_count = 0
 
     async with AsyncSessionLocal() as db:
